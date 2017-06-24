@@ -180,6 +180,7 @@ static void help(void)
 		"  -Z --upload-size <bytes>\tSpecify the expected upload size in bytes\n"
 		"  -D --download <file>\t\tWrite firmware from <file> into device\n"
 		"  -R --reset\t\t\tIssue USB Reset signalling once we're finished\n"
+		"  -r --reset-only\t\t\tOnly issues USB Reset\n"
 		"  -s --dfuse-address <address>\tST DfuSe mode, specify target address for\n"
 		"\t\t\t\traw file download or upload. Not applicable for\n"
 		"\t\t\t\tDfuSe file (.dfu) downloads\n"
@@ -218,8 +219,82 @@ static struct option opts[] = {
 	{ "download", 1, 0, 'D' },
 	{ "reset", 0, 0, 'R' },
 	{ "dfuse-address", 1, 0, 's' },
+	{ "reset-only", 0, 0, 'r' },
 	{ 0, 0, 0, 0 }
 };
+
+//*****************************************************************************
+//
+// The structure sent to the host when a valid USBD_DFU_REQUEST_TIVA is
+// received while the DFU device is in idle state.
+//
+//*****************************************************************************
+#pragma pack(1)
+typedef struct
+{
+    unsigned short usMarker;        // DFU_PROTOCOL_TIVA_MARKER
+    unsigned short usVersion;       // DFU_PROTOCOL_TIVA_VERSION_1
+}
+tLMDFUQueryTivaProtocol;
+#pragma pack()
+
+int dfu_tiva_reset(struct dfu_if *dif)
+{
+#pragma pack(1)
+	typedef struct
+	{
+		unsigned char ucCommand;
+		unsigned char usData[7];
+	} tDFUDownloadHeader;
+#pragma pack()
+#define TIVA_DFU_CMD_LEN (sizeof(tDFUDownloadHeader))
+
+	enum dfu_tiva {
+		USBD_DFU_REQUEST_DNLOAD = 0x01,
+		TIVA_DFU_CMD_RESET		= 0x07,
+		USBD_DFU_REQUEST_TIVA   = 0x42,
+		REQUEST_TIVA_VALUE		= 0x23
+	};
+
+	// BEGIN From dfu.c
+	int status;
+	tLMDFUQueryTivaProtocol sProt;
+//	unsigned char data[sizeof(tLMDFUQueryTivaProtocol)];
+
+	status = libusb_control_transfer( dif->dev_handle,
+		  /* bmRequestType */ LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE,
+		  /* bRequest      */ USBD_DFU_REQUEST_TIVA,
+		  /* wValue        */ REQUEST_TIVA_VALUE,
+		  /* wIndex        */ dif->interface,
+		  /* Data          */ (unsigned char*) &sProt,
+		  /* wLength       */ sizeof(tLMDFUQueryTivaProtocol),
+							  5000 );
+	if (status == sizeof(tLMDFUQueryTivaProtocol))
+	{
+		// Since we got back the expected value, assume this device supports Tiva extensions
+		tDFUDownloadHeader sHeader;
+		sHeader.ucCommand = TIVA_DFU_CMD_RESET;
+		status = libusb_control_transfer( dif->dev_handle,
+			  /* bmRequestType */ LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE,
+			  /* bRequest      */ USBD_DFU_REQUEST_DNLOAD,
+			  /* wValue        */ 0,
+			  /* wIndex        */ dif->interface,
+			  /* Data          */ (unsigned char*) &sHeader,
+			  /* wLength       */ sizeof(tDFUDownloadHeader),
+								  5000 );
+
+		printf("Releasing interface\n");
+		if((status = libusb_release_interface(dfu_root->dev_handle,
+					 dfu_root->interface)) != 0)
+		{
+			printf("Error occured releasing interface\n");
+			return status;
+		}
+		printf("Interface released\n");
+	}
+
+	return 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -231,6 +306,7 @@ int main(int argc, char **argv)
 	struct dfu_file file;
 	char *end;
 	int final_reset = 0;
+	int reset_only = 0;
 	int ret;
 	int dfuse_device = 0;
 	int fd;
@@ -246,7 +322,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int c, option_index = 0;
-		c = getopt_long(argc, argv, "hVvleE:d:p:c:i:a:S:t:U:D:Rs:Z:", opts,
+		c = getopt_long(argc, argv, "hVvleE:d:p:c:i:a:S:t:U:D:Rs:Z:r", opts,
 				&option_index);
 		if (c == -1)
 			break;
@@ -315,6 +391,10 @@ int main(int argc, char **argv)
 			break;
 		case 'R':
 			final_reset = 1;
+			break;
+		case 'r':
+			reset_only = 1;
+			mode = MODE_RESET;
 			break;
 		case 's':
 			dfuse_options = optarg;
@@ -392,6 +472,7 @@ int main(int argc, char **argv)
 
 	printf("Run-time device DFU version %04x\n",
 	       libusb_le16_to_cpu(dfu_root->func_dfu.bcdDFUVersion));
+
 
 	/* Transition from run-Time mode to DFU mode */
 	if (!(dfu_root->flags & DFU_IFF_DFU)) {
@@ -658,6 +739,8 @@ status_again:
 				exit(1);
 	 	}
 		break;
+	case MODE_RESET:
+		break;
 	case MODE_DETACH:
 		if (dfu_detach(dfu_root->dev_handle, dfu_root->interface, 1000) < 0) {
 			warnx("can't detach");
@@ -668,22 +751,45 @@ status_again:
 		break;
 	}
 
-	if (final_reset) {
-		if (dfu_detach(dfu_root->dev_handle, dfu_root->interface, 1000) < 0) {
-			/* Even if detach failed, just carry on to leave the
-                           device in a known state */
-			warnx("can't detach");
-		}
+	if (final_reset || reset_only) {
 		printf("Resetting USB to switch back to runtime mode\n");
-		ret = libusb_reset_device(dfu_root->dev_handle);
+		ret = dfu_tiva_reset(dfu_root);
 		if (ret < 0 && ret != LIBUSB_ERROR_NOT_FOUND) {
 			errx(EX_IOERR, "error resetting after download: %s", libusb_error_name(ret));
 		}
 	}
 
+	libusb_release_interface(dfu_root->dev_handle, dfu_root->interface);
 	libusb_close(dfu_root->dev_handle);
 	dfu_root->dev_handle = NULL;
 	libusb_exit(ctx);
+
+	/* keeping handles open might prevent re-enumeration */
+	disconnect_devices();
+
+	exit(0);
+
+//	if (mode == MODE_DETACH) {
+//		libusb_exit(ctx);
+//		exit(0);
+//	}
+
+//	if (final_reset) {
+//		if (dfu_detach(dfu_root->dev_handle, dfu_root->interface, 1000) < 0) {
+//			/* Even if detach failed, just carry on to leave the
+//                           device in a known state */
+//			warnx("can't detach");
+//		}
+//		printf("Resetting USB to switch back to runtime mode\n");
+//		ret = libusb_reset_device(dfu_root->dev_handle);
+//		if (ret < 0 && ret != LIBUSB_ERROR_NOT_FOUND) {
+//			errx(EX_IOERR, "error resetting after download: %s", libusb_error_name(ret));
+//		}
+//	}
+//
+//	libusb_close(dfu_root->dev_handle);
+//	dfu_root->dev_handle = NULL;
+//	libusb_exit(ctx);
 
 	return (0);
 }
