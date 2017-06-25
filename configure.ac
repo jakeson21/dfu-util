@@ -11,6 +11,7 @@ AC_CONFIG_HEADERS([config.h])
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 
 # Checks for programs.
+AC_PROG_CXX
 AC_PROG_CC
 
 # Checks for libraries.
@@ -22,6 +23,7 @@ AS_IF([test x$native_libusb = xno], [
 ])
 
 LIBS="$LIBS $USB_LIBS"
+CXXFLAGS="$CXXFLAGS $USB_CXXFLAGS"
 CFLAGS="$CFLAGS $USB_CFLAGS"
 
 # Checks for header files.
@@ -29,7 +31,7 @@ AC_HEADER_STDC
 AC_CHECK_HEADERS([windows.h sysexits.h unistd.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
-AC_C_CONST
+#AC_C_CONST
 AC_TYPE_SIZE_T
 
 # Checks for library functions.

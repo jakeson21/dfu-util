@@ -17,7 +17,9 @@ dfu_util_SOURCES = main.c \
 		dfu_file.c \
 		dfu_file.h \
 		quirks.c \
-		quirks.h
+		quirks.h \
+		lmdfu.c \
+		lmdfu.h
 
 dfu_suffix_SOURCES = suffix.c \
 		dfu_file.h \
